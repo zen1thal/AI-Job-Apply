@@ -1,5 +1,6 @@
-.pdf
-.DS_Store
-.env    
+*.pdf
+*.DS_Store
+*.env
+*.txt    
 __pycache__/
-.vscode/
+*.vscode/
