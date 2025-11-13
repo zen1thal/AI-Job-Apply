@@ -1,10 +1,10 @@
-# Linkedin, Infojobs, Indeed Job Apply Bot
+# Linkedin AI Job Apply Bot
 
 No time to be sitting for the entire day applying for jobs? No problem, this script might help you with the issue
 
 ## Progress
 
-The code development is still in progress and it's made only for research reasons. It is planned to add later local
+This is my first serious project that is being made with tons of investigation and learning(since that's what hypes me up). The code development is still in progress and it's made only for research reasons. It is planned to add later local
 AI functionality model to respond custom questions that are outside of the algorithm. Any contributions would pretty
 appreciated since the idea of this project consists of learning Python libraries while working with AI models.
 
@@ -17,7 +17,7 @@ appreciated since the idea of this project consists of learning Python libraries
 
 Update the config.json:
 
-```json
+```yaml
 username: # Insert your username here
 password: # Insert your password here
 
@@ -34,8 +34,20 @@ Chrome User Directory:
 
 Profile:
 - # Current Chrome Profile
+
+Ollama model:
+- # The offline ollama model to generate the answer
+- # You can use any model from ollama, the better ones, the stronger hardware you should have
+
+Ollama embed:
+- # The ollama embed model to switch text for ai modl to understand t
+
+
+CV path:
+- # You can use any custom cv path or directly place it in the folder and call it cv.pdf
 ```
 
+## Installation
 
 Used Python 3.9.4 on MacOS via Virtual Environment/Conda
 
@@ -43,6 +55,13 @@ Before running, install the necessary libraries
 
 ```bash
 pip3 install -r requirements.txt
+```
+
+### Install Ollama models
+
+```bash
+ollama run deepseek-r1:7b  
+ollama pull mxbai-embed-large  
 ```
 
 ## Execute

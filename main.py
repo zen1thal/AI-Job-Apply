@@ -1,22 +1,110 @@
 import json
 import time
 import random
+import logging
+import os
+from pathlib import Path
+from typing import List
+
 from selenium import webdriver
 from webdriver_manager.chrome import ChromeDriverManager
-# from selenium.webdriver.firefox.options import Options
-# from selenium.webdriver.firefox.firefox_profile import FirefoxProfile
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.common.by import By
-
 from selenium.webdriver.chrome.service import Service as ChromeService
 from webdriver_manager.chrome import ChromeDriverManager
 
+import ollama
+import chromadb
+from chromadb.utils import embedding_functions
+from tqdm import tqdm
+from PyPDF2 import PdfReader
+
+
 KEYWORDS = ["junior developer", "fullstack", "backend", "frontend"]
 
+CHUNK_SIZE = 500                      
+CHUNK_OVERLAP = 50
+
+DB_PATH = "./chroma_db"
+COLLECTION_NAME = "pdf_chunks"
+
+
+# Load config
 with open('config.json', 'r') as file:
     config = json.load(file)
+    
+# Logging setup    
+    
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+log = logging.getLogger(__name__)
+    
+    
+# --------------------------------------------------------------------------- #
+# 1. Load & Chunk PDF
+# --------------------------------------------------------------------------- #    
+    
+def load_pdf_text(pdf_path: str) -> str:
+    reader = PdfReader(pdf_path)
+    text = ""
+    for page in reader.pages:
+        text += page.extract_text() + "\n"
+    print(f"Extracted {len(text):,} characters from {len(reader.pages)} pages.")
+    return text
+    
 
+def chunk_text(text: str, chunk_size: int, overlap: int) -> List[str]:
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunk = text[start:end]
+        chunks.append(chunk.strip())
+        start = end - overlap
+        if start >= len(text):
+            break
+    print(f"Created {len(chunks)} chunks.")
+    return chunks
+
+# --------------------------------------------------------------------------- #
+# 2. Embed & Store in Chroma
+# --------------------------------------------------------------------------- #
+
+def get_embedding_function():
+    return embedding_functions.OllamaEmbeddingFunction(
+        model_name=config['ollama_embed'],
+        url="http://localhost:11434"
+    )
+
+def build_vector_db(pdf_path: str):
+    text = load_pdf_text(pdf_path)
+    chunks = chunk_text(text, CHUNK_SIZE, CHUNK_OVERLAP)
+
+    client = chromadb.PersistentClient(path=DB_PATH)
+    embedding_fn = get_embedding_function()
+
+    collection = client.get_or_create_collection(
+        name=COLLECTION_NAME,
+        embedding_function=embedding_fn,
+        metadata={"hnsw:space": "cosine"}  
+    )
+
+    log.info("Embedding and storing chunks...")
+    for i, chunk in enumerate(tqdm(chunks)):
+        collection.add(
+            ids=[f"chunk_{i}"],
+            documents=[chunk],
+            metadatas=[{"source": "pdf", "chunk_id": i}]
+        )
+    log.info(f"Stored {collection.count()} chunks.")
+    
+# --------------------------------------------------------------------------- #
+# 3. Browser Setup & Login
+# --------------------------------------------------------------------------- #
+ 
 def human_delay(min_seconds=1, max_seconds=5):
     time.sleep(random.uniform(min_seconds, max_seconds))
 
@@ -30,13 +118,11 @@ def browser_setup():
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--ignore-certificate-errors")
     opts.add_argument("--no-sandbox")
-    # # Can be useful on Mac to disable GPU
     opts.add_argument("--disable-gpu")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"]) 
     opts.add_experimental_option('useAutomationExtension', False)
     opts.add_argument("--remote-debugging-port=9222")
-
-    # browser = webdriver.Firefox(options=opts)
+    
     browser = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=opts)
 
     print("Chrome options configured.")
@@ -54,6 +140,62 @@ def login(browser, username,password):
     except Exception as e:
            print(f" Username/password field or login button not found, {e}")
 
+
+# --------------------------------------------------------------------------- #
+# 4. Retrieve & Answer
+# --------------------------------------------------------------------------- #
+
+def retrieve_context(question: str, top_k: int = 4) -> str:
+    client = chromadb.PersistentClient(path=DB_PATH)
+    collection = client.get_collection(name=COLLECTION_NAME)
+    results = collection.query(
+        query_texts=[question],
+        n_results=top_k
+    )
+    context = "\n\n".join(results["documents"][0])
+    return context
+
+def get_questions(browser):
+    questions = []
+    try:
+        question_elements = browser.find_elements(By.CLASS_NAME, "fb-single-question__question")
+        for element in question_elements:
+            questions.append(element.text)
+    except Exception as e:
+        print(f"Could not retrieve application questions: {e}")
+    return questions
+
+def generate_answers(question: str) -> str:
+    context = retrieve_context(question)
+    prompt = [
+        {
+            "role": "system",
+            "content": (
+                "You are an expert assistant. Answer the question using ONLY the provided context from the PDF. "
+                "If the answer is not in the context, say 'I don't know based on the document.' "
+                "Write in clear Markdown. Do not add meta-comments."
+            )
+        },
+        {
+            "role": "user",
+            "content": f"Context:\n{context}\n\nQuestion: {question}\n\nAnswer:"
+        }
+    ]
+
+    log.info(f"Asking {config['ollama_model']} in chat mode...")
+    response = ollama.chat(
+        model=config['ollama_model'],
+        messages=prompt,
+        options={
+            "temperature": 0.2,
+            "num_predict": 2000,   
+            "num_ctx": 8192,      
+            "stop": []             
+        }
+    )
+    return response['message']['content'].strip()
+
+
 def start_apply(browser):
 
     try:
@@ -70,7 +212,6 @@ def start_apply(browser):
 
             for job in links:
                 try:
-                    # Scroll to the job listing to make it visible
                     browser.execute_script("arguments[0].scrollIntoView();", job)
                     human_delay(1, 3)
 
@@ -119,16 +260,30 @@ def start_apply(browser):
     except Exception as e:
         print(f"Could not complete the search for keyword '{keyword}': {e}")
 
-    # TODO: AI integration for cover letter generation or custome responses
-    # Close browser after some time
     browser.quit()
 
+# --------------------------------------------------------------------------- #
+# Main
+# --------------------------------------------------------------------------- #
+
 def main():
-    browser = browser_setup()
-    print("Browser opened with profile")
+    pdf_path = Path(config['pdf_path'])
+    if not pdf_path.exists():
+        raise FileNotFoundError(f"PDF not found: {config['pdf_path']}")
+    
+    if not os.path.exists(DB_PATH):
+        build_vector_db(config['pdf_path'])
+    else:
+        log.info("Using existing vector DB.")
+        
+    # browser = browser_setup()
+    # print("Browser opened with profile")
      
-    login(browser, config['username'], config['password'])
-    start_apply(browser)
+    # login(browser, config['username'], config['password'])
+    # questions = get_questions(browser)
+    response = generate_answers("How many years of experience does the person from pdf have as a developer?")
+    print(f"\nA: {response}\n")
+    # start_apply(browser)
 
 
 if __name__ == "__main__":
